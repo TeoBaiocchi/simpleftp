@@ -188,10 +188,30 @@ int main (int argc, char *argv[]) {
     struct sockaddr_in addr;
 
     // arguments checking
+    if(argc != 3){
+        perror("Cantidad incorrecta de argumentos.\nChau\n");
+        return -1;
+    }
 
     // create socket and check for errors
-    
-    // set socket data    
+    sd = socket(PF_INET, SOCK_STREAM, 0);
+
+    // set socket data   
+    addr.sin_family = AF_INET; //IPv4
+    addr.sin_port = htons(atoi(argv[2]));
+    if(inet_pton(AF_INET, argv[1], &(addr.sin_addr)) <= 0){
+        perror("Ocurrio un problema parseando la IP.");
+        return -1;
+    };
+    memset(&(addr.sin_zero), 0, 8);
+
+    bind(sd, (struct sockaddr *)&addr, sizeof(addr));
+ 
+    if(connect(sd, (struct sockaddr *)&addr, sizeof(addr)) < 0){
+        perror("Algo salio mal al conectar.");
+        close(sd);
+        return -1;
+    }
 
     // connect and check for errors
 
