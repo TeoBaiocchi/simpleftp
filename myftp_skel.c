@@ -207,17 +207,18 @@ int main (int argc, char *argv[]) {
 
     bind(sd, (struct sockaddr *)&addr, sizeof(addr));
  
+    // connect and check for errors
     if(connect(sd, (struct sockaddr *)&addr, sizeof(addr)) < 0){
         perror("Algo salio mal al conectar.");
         close(sd);
         return -1;
     }
 
-    // connect and check for errors
-
     // if receive hello proceed with authenticate and operate if not warning
+    char respuesta[MSGSIZE];
+    recv(sd, respuesta, MSGSIZE, MSG_PEEK);
 
     // close socket
-
+    close(sd);
     return 0;
 }
