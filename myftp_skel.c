@@ -1,11 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
-
 #include <string.h>
 #include <stdbool.h>
 #include <unistd.h>
 #include <err.h>
-
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
@@ -25,7 +23,7 @@ bool recv_msg(int sd, int code, char *text) {
     int recv_s, recv_code;
 
     // receive the answer
-
+    recv_s = recv(sd, buffer, BUFSIZE, NULL);
 
     // error checking
     if (recv_s < 0) warn("error receiving data");
@@ -49,6 +47,8 @@ bool recv_msg(int sd, int code, char *text) {
 void send_msg(int sd, char *operation, char *param) {
     char buffer[BUFSIZE] = "";
 
+    int send_s; 
+
     // command formating
     if (param != NULL)
         sprintf(buffer, "%s %s\r\n", operation, param);
@@ -56,7 +56,8 @@ void send_msg(int sd, char *operation, char *param) {
         sprintf(buffer, "%s\r\n", operation);
 
     // send command and check for errors
-
+    send_s = send(sd, buffer,sizeof(buffer),0);
+    if (send_s < 0) warn("error sending data");
 }
 
 /**
@@ -79,30 +80,45 @@ void authenticate(int sd) {
     char *input, desc[100];
     int code;
 
-    // ask for user
-    printf("username: ");
-    input = read_input();
+    bool bandera = false;
 
-    // send the command to the server
-    
-    // relese memory
-    free(input);
+    while(!bandera) {
+        // ask for user
+        printf("username: ");
+        input = read_input();
 
-    // wait to receive password requirement and check for errors
+        // send the command to the server
+        send_msg(sd, input, NULL);
 
+        // relese memory
+        free(input);
 
-    // ask for password
-    printf("passwd: ");
-    input = read_input();
+        // wait to receive password requirement and check for errors
+        if(recv_msg(sd, 331, desc)){
+            printf("%s\n", desc);
+            bandera = true;
+        }
+    }
 
-    // send the command to the server
+    bandera = false;
 
+    while(!bandera){
+        // ask for password
+        printf("passwd: ");
+        input = read_input();
 
-    // release memory
-    free(input);
+        // send the command to the server
+        send_msg(sd, input, NULL);
 
-    // wait for answer and process it and check for errors
+        // release memory
+        free(input);
 
+        // wait for answer and process it and check for errors
+        if(recv_msg(sd, 230, desc)){
+            authenticated = true;
+            printf("%s\n", desc);
+        }
+    }
 }
 
 /**
@@ -195,6 +211,9 @@ int main (int argc, char *argv[]) {
 
     // create socket and check for errors
     sd = socket(PF_INET, SOCK_STREAM, 0);
+    if(sd == -1){
+        perror("No se pudo crear el socket\n");
+    } 
 
     // set socket data   
     addr.sin_family = AF_INET; //IPv4
@@ -203,6 +222,7 @@ int main (int argc, char *argv[]) {
         perror("Ocurrio un problema parseando la IP.");
         return -1;
     };
+
     memset(&(addr.sin_zero), 0, 8);
 
     bind(sd, (struct sockaddr *)&addr, sizeof(addr));
@@ -215,9 +235,20 @@ int main (int argc, char *argv[]) {
     }
 
     // if receive hello proceed with authenticate and operate if not warning
-    char respuesta[MSGSIZE];
-    recv(sd, respuesta, MSGSIZE, MSG_PEEK);
+    char respuesta[BUFSIZE];  
 
+    if(recv_msg(sd, 220, respuesta)){
+        //Si recibimos codigo hello todo bien. Mostramos
+        printf("Respuesta: %s", respuesta);
+    } else {
+        //Si no, todo mal.
+        close(sd);
+        perror("Fallo la conexion con el servidor. Chau.");
+        return -1;
+    }
+
+    authenticate(sd);
+    
     // close socket
     close(sd);
     return 0;
