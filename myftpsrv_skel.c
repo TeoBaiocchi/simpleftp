@@ -7,6 +7,10 @@
 #include <unistd.h>
 #include <err.h>
 
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netdb.h>
+
 #include <netinet/in.h>
 
 #define BUFSIZE 512
@@ -43,7 +47,7 @@ bool recv_cmd(int sd, char *operation, char *param) {
 
 
     // expunge the terminator characters from the buffer
-    buffer[strcspn(buffer, "\r\n")] = 0;
+    buffer[strcspn(buffer, "\r\n")] = '\0';
 
     // complex parsing of the buffer
     // extract command receive in operation if not set \0
@@ -81,10 +85,12 @@ bool send_ans(int sd, char *message, ...){
     vsprintf(buffer, message, args);
     va_end(args);
     // send answer preformated and check errors
-
-
-
-
+    int send_s = send(sd,buffer, sizeof buffer, 0);
+    if(send_s < 0){
+        warn("Error while sending Data");
+        return false;
+    }
+    return true;
 }
 
 /**
@@ -159,15 +165,23 @@ bool authenticate(int sd) {
     char user[PARSIZE], pass[PARSIZE];
 
     // wait to receive USER action
-
+    recv_cmd(sd, "USER", user);
 
     // ask for password
+    send_ans(sd, MSG_331, user);
 
     // wait to receive PASS action
+    recv_cmd(sd, "PASS", pass);
 
     // if credentials don't check denied login
+    if(!check_credentials(user, pass)){
+        send_ans(sd, MSG_530);
+        return false;
+    }
 
     // confirm login
+    send_ans(sd, MSG_230, user);
+    return true;
 }
 
 /**
@@ -181,16 +195,15 @@ void operate(int sd) {
     while (true) {
         op[0] = param[0] = '\0';
         // check for commands send by the client if not inform and exit
-
-
+        if(!recv_cmd(sd, op, param)){
+                errx(1,"Didnt recieve command");
+        }
         if (strcmp(op, "RETR") == 0) {
             retr(sd, param);
         } else if (strcmp(op, "QUIT") == 0) {
             // send goodbye and close connection
-
-
-
-
+            send_ans(sd,MSG_221);
+            close(sd);
             break;
         } else {
             // invalid command
@@ -213,25 +226,65 @@ int main (int argc, char *argv[]) {
     }
 
     // reserve sockets and variables space
-    int master_sd, slave_sd;
-    struct sockaddr_in master_addr, slave_addr;
+    int master_sd, slave_sd, status;
+    struct sockaddr_in slave_addr, *master_addr;
+    struct addrinfo hints, *servinfo;
+
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE;
+
+    if((status = getaddrinfo(NULL, argv[1], &hints, &servinfo)) != 0){
+        fprintf(stderr, "getaddrinfo error: %s\n", gai_strerror(status));
+        exit(1);
+    }
 
     // create server socket and check errors
-    
+    master_addr =(struct sockaddr_in*) servinfo->ai_addr;
+
+    //Cambiar los mensajes de español (en el cliente) a ingles. O bien poner todo en español
+    //TODO: UNIFICAR IDIOMA!
+    master_sd = socket(PF_INET, SOCK_STREAM, 0);
+    if(master_sd == -1) {
+        perror("Failed opening socket\n");
+        return -1;
+    }
+
     // bind master socket and check errors
+    if(bind(master_sd, (struct sockaddr *)master_addr, servinfo->ai_addrlen) < 0){
+        close(master_sd);
+        errx(1, "Failed binding master socket");
+    }
 
     // make it listen
+    if(listen(master_sd, 5) < 0){
+        close(master_sd);
+        errx(1, "Failed while listening to the socket.\n");
+    }
 
     // main loop
     while (true) {
         // accept connectiones sequentially and check errors
+        socklen_t slave_len = sizeof(slave_addr);
+        slave_sd = accept(master_sd, (struct sockaddr *) &slave_addr, &slave_len);
+        if(!fork()){
+        close(master_sd);
 
         // send hello
+        send_ans(slave_sd, MSG_220);
 
         // operate only if authenticate is true
+        if(authenticate(slave_sd)){
+            operate(slave_sd);
+        } else {
+            close(slave_sd);
+            }
+            return 0;
+        }
     }
-
     // close server socket
-
+    freeaddrinfo(servinfo);
+    close(master_sd);
     return 0;
 }
