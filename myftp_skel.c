@@ -8,6 +8,14 @@
 #include <arpa/inet.h>
 
 #define BUFSIZE 512
+#define MSGSIZE 1024
+
+#define COD_HELLO_MSG 220
+#define COD_GOODBYE 221 
+#define COD_USR_EXISTS 331
+#define COD_PASS_OK 230
+#define COD_FILE_EXISTS 299
+#define COD_TRANSFER_OK 226
 
 /**
  * function: receive and analize the answer from the server
@@ -23,7 +31,7 @@ bool recv_msg(int sd, int code, char *text) {
     int recv_s, recv_code;
 
     // receive the answer
-    recv_s = recv(sd, buffer, BUFSIZE, NULL);
+    recv_s = recv(sd, buffer, BUFSIZE, 0);
 
     // error checking
     if (recv_s < 0) warn("error receiving data");
@@ -88,16 +96,16 @@ void authenticate(int sd) {
         input = read_input();
 
         // send the command to the server
-        send_msg(sd, input, NULL);
+        send_msg(sd, "USER", input);
 
         // relese memory
         free(input);
 
         // wait to receive password requirement and check for errors
-        if(recv_msg(sd, 331, desc)){
-            printf("%s\n", desc);
+        if(recv_msg(sd, COD_USR_EXISTS, desc)){
             bandera = true;
         }
+        printf("%s\n", desc);
     }
 
     bandera = false;
@@ -108,16 +116,16 @@ void authenticate(int sd) {
         input = read_input();
 
         // send the command to the server
-        send_msg(sd, input, NULL);
+        send_msg(sd, "PASS", input);
 
         // release memory
         free(input);
 
         // wait for answer and process it and check for errors
-        if(recv_msg(sd, 230, desc)){
+        if(recv_msg(sd, COD_PASS_OK, desc)){
             authenticated = true;
-            printf("%s\n", desc);
         }
+        printf("%s\n", desc);
     }
 }
 
@@ -127,30 +135,39 @@ void authenticate(int sd) {
  * file_name: file name to get from the server
  **/
 void get(int sd, char *file_name) {
-    char desc[BUFSIZE], buffer[BUFSIZE];
-    int f_size, recv_s, r_size = BUFSIZE;
+    char desc[BUFSIZE], buffer[BUFSIZE], text[MSGSIZE];
+    long int f_size;
     FILE *file;
 
     // send the RETR command to the server
+    send_msg(sd, "RETR", file_name);
 
     // check for the response
+    if(!recv_msg(sd, COD_FILE_EXISTS, buffer)){
+        warn(buffer);
+        return;
+    }
 
     // parsing the file size from the answer received
     // "File %s size %ld bytes"
-    sscanf(buffer, "File %*s size %d bytes", &f_size);
+    sscanf(buffer, "File %*s size %ld bytes", &f_size);
 
     // open the file to write
     file = fopen(file_name, "w");
 
     //receive the file
-
+    //TODO: Hacer esto
 
 
     // close the file
     fclose(file);
 
     // receive the OK from the server
-
+    if(!recv_msg(sd, COD_TRANSFER_OK, text)) {
+        warn(text);
+    } else {
+        printf("%s\n", text);
+    } 
 }
 
 /**
@@ -158,10 +175,20 @@ void get(int sd, char *file_name) {
  * sd: socket descriptor
  **/
 void quit(int sd) {
+
     // send command QUIT to the client
+    //*Quiso decir server?
+    //O from the client
+
+    char text[BUFSIZE];
+    send_msg(sd, QUIT, NULL);
 
     // receive the answer from the server
-
+    if(recv_msg(sd, COD_GOODBYE, text)){
+        perror(text); 
+    } else {
+        printf("%s\n", text);
+    }
 }
 
 /**
@@ -201,6 +228,7 @@ void operate(int sd) {
  **/
 int main (int argc, char *argv[]) {
     int sd;
+    char hello_msg[BUFSIZE];
     struct sockaddr_in addr;
 
     // arguments checking
@@ -216,15 +244,14 @@ int main (int argc, char *argv[]) {
     } 
 
     // set socket data   
+    // TODO: Revisar esto.
     addr.sin_family = AF_INET; //IPv4
     addr.sin_port = htons(atoi(argv[2]));
     if(inet_pton(AF_INET, argv[1], &(addr.sin_addr)) <= 0){
         perror("Ocurrio un problema parseando la IP.");
         return -1;
     };
-
     memset(&(addr.sin_zero), 0, 8);
-
     bind(sd, (struct sockaddr *)&addr, sizeof(addr));
  
     // connect and check for errors
@@ -237,8 +264,8 @@ int main (int argc, char *argv[]) {
     // if receive hello proceed with authenticate and operate if not warning
     char respuesta[BUFSIZE];  
 
-    if(recv_msg(sd, 220, respuesta)){
-        //Si recibimos codigo hello todo bien. Mostramos
+    if(recv_msg(sd, COD_HELLO_MSG, respuesta)){
+        //Si recibimos codigo hello todo bien. Mostramos respuesta
         printf("Respuesta: %s", respuesta);
     } else {
         //Si no, todo mal.
@@ -248,7 +275,8 @@ int main (int argc, char *argv[]) {
     }
 
     authenticate(sd);
-    
+    operate(sd);
+
     // close socket
     close(sd);
     return 0;
