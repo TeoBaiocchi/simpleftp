@@ -39,7 +39,7 @@ bool recv_msg(int sd, int code, char *text) {
 
     // parsing the code and message receive from the answer
     sscanf(buffer, "%d %[^\r\n]\r\n", &recv_code, message);
-    printf("%d %s\n", recv_code, message);
+    //printf("%d %s\n", recv_code, message);
     // optional copy of parameters
     if(text) strcpy(text, message);
     // boolean test for the code
@@ -80,12 +80,58 @@ char * read_input() {
     return NULL;
 }
 
+int setSocketData(int sd){
+    
+    int data_fd;
+    struct sockaddr_in socketData;
+    socklen_t dataLen = sizeof(socketData);
+    char portArgs[BUFSIZE];
+
+    data_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if(data_fd < 0 ){
+        errx(1, "Error abriendo socket.");
+    }
+
+    socketData.sin_family = AF_INET; //IPv4
+    socketData.sin_addr.s_addr = htonl(INADDR_ANY);
+    socketData.sin_port = htons(0); //Puerto "al azar"
+    if (bind(data_fd, (struct sockaddr*)&socketData, sizeof(socketData)) < 0) {
+        errx(1, "Error tratando de bindear socket");
+    }
+
+    if (getsockname(data_fd, (struct sockaddr *)&socketData, &dataLen) < 0) {
+        close(data_fd);
+        errx(1, "Error tratando de obtener informacion para setear al socket");
+    }
+
+    //Conversión de endianes para portabilidad
+    uint32_t ip_addr = ntohl(socketData.sin_addr.s_addr);
+    unsigned char ip[4];
+    ip[0] = (ip_addr >> 24) & 0xFF;
+    ip[1] = (ip_addr >> 16) & 0xFF;
+    ip[2] = (ip_addr >> 8) & 0xFF;
+    ip[3] = ip_addr & 0xFF;
+    uint16_t portNum = ntohs(socketData.sin_port);
+
+    //Impresion de la direccion por octetos y los valores de puerto segun convencion
+    sprintf(portArgs, "%d,%d,%d,%d,%d,%d", ip[0], ip[1], ip[2], ip[3], portNum/256, portNum %256);
+
+    if(listen(data_fd, 1) < 0){
+        close(data_fd);
+        errx(1, "Error tratando de escuchar por el socket\n");
+    }
+
+    send_msg(sd,"PORT", portArgs);
+
+    return data_fd;
+}
+
 /**
  * function: login process from the client side
  * sd: socket descriptor
  **/
 void authenticate(int sd) {
-    char *input, desc[100];
+    char *input, desc[BUFSIZE];
     int code;
 
     bool bandera = false;
@@ -98,14 +144,15 @@ void authenticate(int sd) {
         // send the command to the server
         send_msg(sd, "USER", input);
 
-        // relese memory
+        // release memory
         free(input);
 
         // wait to receive password requirement and check for errors
         if(recv_msg(sd, COD_USR_EXISTS, desc)){
             bandera = true;
+        } else {
+            errx(1, "No se pudo leer el nombre de usuario.");
         }
-        printf("%s\n", desc);
     }
 
     bandera = false;
@@ -123,10 +170,27 @@ void authenticate(int sd) {
 
         // wait for answer and process it and check for errors
         if(recv_msg(sd, COD_PASS_OK, desc)){
-            authenticated = true;
+            bandera = true;
+        } else {
+            errx(1, "No se pudo leer la password");
         }
+        //Printf no esta unicamente para debugging, tiene un mensaje piola
         printf("%s\n", desc);
     }
+}
+
+void recv_file(int serverDataDescriptor, FILE* file, long int fSize){
+    char buffer[BUFSIZE];
+    int bufLen;
+    long int received = 0;
+    for(; (bufLen = recv(serverDataDescriptor, buffer, BUFSIZE, 0)) && received <= fSize; received += bufLen){
+        if(bufLen == -1){
+            warn("Error tratando de obtener archivo desde el servidor");
+            break;
+        }
+        fwrite(buffer, sizeof(char), bufLen, file);
+    }
+    close(serverDataDescriptor);
 }
 
 /**
@@ -136,8 +200,11 @@ void authenticate(int sd) {
  **/
 void get(int sd, char *file_name) {
     char desc[BUFSIZE], buffer[BUFSIZE], text[MSGSIZE];
-    long int f_size;
+    long int fileSize;
     FILE *file;
+
+    //Obtenemos el fd del socket por el que vamos a recibir la transferencia
+    int data_fd = setSocketData(sd);
 
     // send the RETR command to the server
     send_msg(sd, "RETR", file_name);
@@ -150,17 +217,21 @@ void get(int sd, char *file_name) {
 
     // parsing the file size from the answer received
     // "File %s size %ld bytes"
-    sscanf(buffer, "File %*s size %ld bytes", &f_size);
+    sscanf(buffer, "File %*s size %ld bytes", &fileSize);
 
     // open the file to write
     file = fopen(file_name, "w");
 
     //receive the file
-    //TODO: Hacer esto
+    struct sockaddr_in serverData;
+    socklen_t serverDataLen = sizeof(serverData);
+    int serverDataDescriptor = accept(data_fd, (struct sockaddr *) &serverData, &serverDataLen);
 
+    recv_file(serverDataDescriptor, file, fileSize);
 
-    // close the file
+    // close the file y cerrar datafd
     fclose(file);
+    close(data_fd);
 
     // receive the OK from the server
     if(!recv_msg(sd, COD_TRANSFER_OK, text)) {
@@ -181,13 +252,13 @@ void quit(int sd) {
     //O from the client
 
     char text[BUFSIZE];
-    send_msg(sd, QUIT, NULL);
+    send_msg(sd, "QUIT", NULL);
 
     // receive the answer from the server
     if(recv_msg(sd, COD_GOODBYE, text)){
-        perror(text); 
+        printf("%s\n", text); 
     } else {
-        printf("%s\n", text);
+        perror(text);
     }
 }
 
@@ -212,8 +283,7 @@ void operate(int sd) {
         else if (strcmp(op, "quit") == 0) {
             quit(sd);
             break;
-        }
-        else {
+        } else {
             // new operations in the future
             printf("TODO: unexpected command\n");
         }
@@ -255,6 +325,7 @@ int main (int argc, char *argv[]) {
     bind(sd, (struct sockaddr *)&addr, sizeof(addr));
  
     // connect and check for errors
+    
     if(connect(sd, (struct sockaddr *)&addr, sizeof(addr)) < 0){
         perror("Algo salio mal al conectar.");
         close(sd);

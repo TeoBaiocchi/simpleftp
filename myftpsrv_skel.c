@@ -12,6 +12,7 @@
 #include <netdb.h>
 
 #include <netinet/in.h>
+#include <arpa/inet.h>
 
 #define BUFSIZE 512
 #define CMDSIZE 4
@@ -25,6 +26,42 @@
 #define MSG_550 "550 %s: no such file or directory\r\n"
 #define MSG_299 "299 File %s size %ld bytes\r\n"
 #define MSG_226 "226 Transfer complete\r\n"
+
+struct sockaddr_in data_stream;
+
+
+void setSocketData(char* info){
+    int p1, p2, h[4];
+    char client_ip[16];
+
+    // Leer la informacion proporcionada por el cliente
+    sscanf(info, "%d,%d,%d,%d,%d,%d", &h[0],&h[1],&h[2],&h[3],&p1,&p2);
+    sprintf(client_ip, "%d.%d.%d.%d", h[0], h[1], h[2], h[3]);
+
+    //La transformo hacia mi estructura
+    data_stream.sin_family = AF_INET;
+    inet_pton(AF_INET,client_ip, &data_stream.sin_addr);
+    data_stream.sin_port = htons(p1 * 256 + p2);
+}
+
+/**
+ * function: gets the socket that recieves the file to transfer
+ * return: socket to client data stream
+ */
+int getDataDescriptor(){
+    int dataDescriptor = socket(AF_INET, SOCK_STREAM, 0);
+    if(dataDescriptor < 0){
+        warn("No se pudo abrir socket");
+        return -1;
+    }
+    if (connect(dataDescriptor, (struct sockaddr*)&data_stream, sizeof(data_stream)) < 0) {
+        warn("Error al conectar");
+        close(dataDescriptor);
+        return -1;
+    }
+    return dataDescriptor;
+}
+
 
 /**
  * function: receive the commands from the client
@@ -43,8 +80,10 @@ bool recv_cmd(int sd, char *operation, char *param) {
     int recv_s;
 
     // receive the command in the buffer and check for errors
+    recv_s = recv(sd, buffer , BUFSIZE, 0);
 
-
+    if (recv_s < 0) warn("error receiving data");
+    if (recv_s == 0) errx(1, "connection closed by host");
 
     // expunge the terminator characters from the buffer
     buffer[strcspn(buffer, "\r\n")] = '\0';
@@ -66,6 +105,22 @@ bool recv_cmd(int sd, char *operation, char *param) {
         if (token != NULL) strcpy(param, token);
     }
     return true;
+}
+
+/**
+ * function: sends the file to the client
+ * dd: data stream descriptor
+ * file: file to transfer
+ */
+void send_file(int dd, FILE *file){
+    char bread[BUFSIZE];
+    int readed;
+    while((readed = fread(&bread, sizeof(char), BUFSIZE, file)) == BUFSIZE){
+        send(dd, bread, readed, 0);
+    }
+    if(feof(file)){
+        send(dd, bread, readed, 0);
+    }
 }
 
 /**
@@ -98,25 +153,46 @@ bool send_ans(int sd, char *message, ...){
  * sd: socket descriptor
  * file_path: name of the RETR file
  **/
-
 void retr(int sd, char *file_path) {
     FILE *file;    
-    int bread;
-    long fsize;
+    long fileSize;
     char buffer[BUFSIZE];
 
+    //Open File
+    file = fopen(file_path, "r");
+
     // check if file exists if not inform error to client
+    if(!file){
+        send_ans(sd, MSG_530, file_path);
+        return;
+    }
 
     // send a success message with the file length
+    fseek(file, 0, SEEK_END);
+    fileSize = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    send_ans(sd, MSG_299, file_path, fileSize);
 
     // important delay for avoid problems with buffer size
     sleep(1);
 
-    // send the file
+    // obtener descriptor de la conexion
+    int dataDescriptor = getDataDescriptor();
 
+    if(dataDescriptor < 0){
+        fclose(file);
+        return;
+    }
+
+    // send the file
+    send_file(dataDescriptor, file);
+    
     // close the file
+    fclose(file);
 
     // send a completed transfer message
+    send_ans(sd, MSG_226);
+    close(dataDescriptor);
 }
 /**
  * funcion: check valid credentials in ftpusers file
@@ -126,6 +202,8 @@ void retr(int sd, char *file_path) {
  **/
 bool check_credentials(char *user, char *pass) {
     FILE *file;
+    //En ftpusers (que debe estar en el mismo directorio que el servidor)
+    //deben figurar "usuario:contraseñas" aceptadas
     char *path = "./ftpusers", *line = NULL, credentials[100];
     size_t line_size = 0;
     bool found = false;
@@ -198,7 +276,9 @@ void operate(int sd) {
         if(!recv_cmd(sd, op, param)){
                 errx(1,"Didnt recieve command");
         }
-        if (strcmp(op, "RETR") == 0) {
+        if (strcmp(op, "PORT") == 0) {
+            setSocketData(param);
+        } else if (strcmp(op, "RETR") == 0) {
             retr(sd, param);
         } else if (strcmp(op, "QUIT") == 0) {
             // send goodbye and close connection
@@ -243,8 +323,6 @@ int main (int argc, char *argv[]) {
     // create server socket and check errors
     master_addr =(struct sockaddr_in*) servinfo->ai_addr;
 
-    //Cambiar los mensajes de español (en el cliente) a ingles. O bien poner todo en español
-    //TODO: UNIFICAR IDIOMA!
     master_sd = socket(PF_INET, SOCK_STREAM, 0);
     if(master_sd == -1) {
         perror("Failed opening socket\n");
@@ -269,20 +347,20 @@ int main (int argc, char *argv[]) {
         socklen_t slave_len = sizeof(slave_addr);
         slave_sd = accept(master_sd, (struct sockaddr *) &slave_addr, &slave_len);
         if(!fork()){
-        close(master_sd);
+            close(master_sd);
 
-        // send hello
-        send_ans(slave_sd, MSG_220);
+            // send hello
+            send_ans(slave_sd, MSG_220);
 
-        // operate only if authenticate is true
-        if(authenticate(slave_sd)){
-            operate(slave_sd);
-        } else {
-            close(slave_sd);
+            // operate only if authenticate is true
+            if(authenticate(slave_sd)){
+                operate(slave_sd);
+            } else {
+                close(slave_sd);
+                }
+                return 0;
             }
-            return 0;
         }
-    }
     // close server socket
     freeaddrinfo(servinfo);
     close(master_sd);
